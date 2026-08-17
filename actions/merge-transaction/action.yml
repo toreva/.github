@@ -1,0 +1,43 @@
+name: Toreva merge transaction
+description: Exact-head GitHub merge provider transaction: revoke, retire, or arm native auto-merge.
+inputs:
+  operation:
+    description: revoke, retire, or arm
+    required: true
+  pr-url:
+    description: Full GitHub pull request URL
+    required: true
+  expected-head:
+    description: Immutable PR head SHA to compare-and-swap
+    required: true
+  required-label:
+    description: Optional label that must still be live before arm
+    required: false
+    default: ''
+  reject-title-prefix:
+    description: Optional title prefix that blocks arm
+    required: false
+    default: '[SUPERSEDED'
+runs:
+  using: composite
+  steps:
+    - name: Execute exact-head merge provider transaction
+      shell: bash
+      env:
+        TOREVA_MERGE_OPERATION: ${{ inputs.operation }}
+        TOREVA_MERGE_PR_URL: ${{ inputs.pr-url }}
+        TOREVA_MERGE_EXPECTED_HEAD: ${{ inputs.expected-head }}
+        TOREVA_MERGE_REQUIRED_LABEL: ${{ inputs.required-label }}
+        TOREVA_MERGE_REJECT_TITLE_PREFIX: ${{ inputs.reject-title-prefix }}
+      run: |
+        set -euo pipefail
+        args=(
+          "$TOREVA_MERGE_OPERATION"
+          "$TOREVA_MERGE_PR_URL"
+          --expected-head "$TOREVA_MERGE_EXPECTED_HEAD"
+          --reject-title-prefix "$TOREVA_MERGE_REJECT_TITLE_PREFIX"
+        )
+        if [[ -n "$TOREVA_MERGE_REQUIRED_LABEL" ]]; then
+          args+=(--required-label "$TOREVA_MERGE_REQUIRED_LABEL")
+        fi
+        python3 "$GITHUB_ACTION_PATH/merge_transaction.py" "${args[@]}"
