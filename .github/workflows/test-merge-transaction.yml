@@ -1,0 +1,25 @@
+name: Shared merge transaction tests
+
+on:
+  pull_request:
+    paths:
+      - 'actions/merge-transaction/**'
+      - '.github/workflows/test-merge-transaction.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'actions/merge-transaction/**'
+      - '.github/workflows/test-merge-transaction.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/test_merge_transaction.py
+      - name: Provider-state regressions
+        run: python3 actions/merge-transaction/test_merge_transaction.py -v
