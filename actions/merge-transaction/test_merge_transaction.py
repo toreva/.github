@@ -45,6 +45,15 @@ if args[:2] == ["api","graphql"]:
     save(); print(json.dumps({"data":{"disablePullRequestAutoMerge":{"pullRequest":pr()}}})); raise SystemExit(0)
   print(json.dumps({"data":{"repository":{"pullRequest":pr()}}})); raise SystemExit(0)
 
+if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/service/commits/") and args[1].endswith("/pulls"):
+  associated=[{"number":42,"state":"open","merged_at":None,"head":{"sha":state["head"]}}]
+  if state.get("duplicate_live"): associated.append({"number":99,"state":"open","merged_at":None,"head":{"sha":state["head"]}})
+  if state.get("consumed_head"): associated.append({"number":99,"state":"closed","merged_at":"2026-08-17T00:00:00Z","head":{"sha":state["head"]}})
+  print(json.dumps(associated)); raise SystemExit(0)
+
+if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/service/pulls/42/files?"):
+  print("[]" if state.get("zero_delta") else json.dumps([{"filename":"src/app.py"}])); raise SystemExit(0)
+
 if args[:4] == ["api","--method","PATCH","repos/example/service/pulls/42"]:
   state["open"] = False; save(); print(json.dumps({"state":"closed"})); raise SystemExit(0)
 
@@ -76,6 +85,8 @@ class MergeTransactionTests(unittest.TestCase):
         return subprocess.run(args, env=self.env, text=True, capture_output=True, check=False)
 
     def final(self): return json.loads(self.state.read_text())
+    def calls(self): return [json.loads(x) for x in self.log.read_text().splitlines() if x]
+    def arm_calls(self): return [x for x in self.calls() if x[:2] == ["pr","merge"]]
 
     def test_revoke_removes_queue_and_auto_merge(self):
         r=self.run_case("revoke", queued=True, auto=True); self.assertEqual(r.returncode,0,r.stderr); self.assertFalse(self.final()["queued"]); self.assertFalse(self.final()["auto"])
@@ -97,6 +108,15 @@ class MergeTransactionTests(unittest.TestCase):
 
     def test_arm_rejects_superseded_title(self):
         r=self.run_case("arm", title="[SUPERSEDED] old vehicle"); self.assertEqual(r.returncode,4); self.assertIn("title_rejected",r.stderr)
+
+    def test_arm_rejects_duplicate_live_head_before_provider_mutation(self):
+        r=self.run_case("arm", duplicate_live=True); self.assertEqual(r.returncode,4); self.assertIn("duplicate_live_head_owner",r.stderr); self.assertEqual(self.arm_calls(),[])
+
+    def test_arm_rejects_consumed_head_before_provider_mutation(self):
+        r=self.run_case("arm", consumed_head=True); self.assertEqual(r.returncode,4); self.assertIn("consumed_head_replay",r.stderr); self.assertEqual(self.arm_calls(),[])
+
+    def test_arm_rejects_zero_delta_before_provider_mutation(self):
+        r=self.run_case("arm", zero_delta=True); self.assertEqual(r.returncode,4); self.assertIn("zero_delta_pr",r.stderr); self.assertEqual(self.arm_calls(),[])
 
     def test_merge_race_during_revoke_is_typed_failure(self):
         r=self.run_case("revoke", queued=True, merge_on_dequeue=True); self.assertEqual(r.returncode,4); self.assertIn("already_or_raced_merged",r.stderr)
