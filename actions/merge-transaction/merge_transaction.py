@@ -4,8 +4,9 @@
 Policy stays in the caller. This module owns only GitHub provider truth:
 - revoke: exact-head observe -> dequeue -> disable auto-merge -> verify absent
 - retire: revoke -> close -> verify CLOSED/unmerged/unarmed
-- arm: live exact-head/state re-read -> optional label/title checks -> arm native
-  auto-merge with compare-and-swap head -> verify merged or armed on same head
+- arm: live exact-head/state re-read -> reject replay/zero-delta -> optional
+  label/title checks -> arm native auto-merge with compare-and-swap head ->
+  verify merged or armed on same head
 
 Exit 0 means the requested provider state was re-observed. Exit 4 is a typed
 fail-closed refusal. No operation force-pushes, changes branch protection, or
@@ -133,6 +134,38 @@ def label_names(snapshot: dict[str, Any]) -> set[str]:
     return {str(node.get("name")) for node in nodes if isinstance(node, dict) and node.get("name")}
 
 
+def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
+    """Refuse provider-observed replay or empty work before merge authorization.
+
+    GitHub itself is the ledger. This makes the invariant available to every
+    repository consuming the shared action, including PRs opened outside any
+    daemon-specific landing path.
+    """
+    raw = run_gh(["api", f"repos/{pr.slug}/commits/{head}/pulls"])
+    associated = load_json(raw, "head_owner_discovery_failed")
+    if not isinstance(associated, list):
+        raise TxnError("head_owner_discovery_failed:unexpected_shape")
+    for candidate in associated:
+        if not isinstance(candidate, dict) or candidate.get("number") == pr.number:
+            continue
+        candidate_head = candidate.get("head")
+        candidate_sha = candidate_head.get("sha") if isinstance(candidate_head, dict) else None
+        if candidate_sha != head:
+            continue
+        merged_at = candidate.get("merged_at")
+        if isinstance(merged_at, str) and merged_at:
+            raise TxnError(f"consumed_head_replay:pr={candidate.get('number')}:head={head}")
+        if str(candidate.get("state", "")).lower() == "open":
+            raise TxnError(f"duplicate_live_head_owner:pr={candidate.get('number')}:head={head}")
+
+    files_raw = run_gh(["api", f"repos/{pr.slug}/pulls/{pr.number}/files?per_page=1"])
+    files = load_json(files_raw, "pr_delta_discovery_failed")
+    if not isinstance(files, list):
+        raise TxnError("pr_delta_discovery_failed:unexpected_shape")
+    if not files:
+        raise TxnError("zero_delta_pr")
+
+
 def emit(operation: str, status: str, pr: PullRequestRef, head: str, **fields: Any) -> None:
     prefix = "Merge-Transaction"
     print(f"{prefix}-Operation: {operation}")
@@ -214,6 +247,8 @@ def arm(pr: PullRequestRef, expected: str, required_label: str, reject_title_pre
         raise TxnError(f"title_rejected:{reject_title_prefix}")
     if required_label and required_label not in label_names(before):
         raise TxnError(f"required_label_missing:{required_label}")
+
+    assert_arm_provider_admission(pr, head)
 
     args = ["pr", "merge", pr.url, "--auto", "--squash", "--delete-branch", "--match-head-commit", head]
     run_gh(args)
