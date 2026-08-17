@@ -68,7 +68,7 @@ class MergeTransactionTests(unittest.TestCase):
 
     def tearDown(self): self.tmp.cleanup()
 
-    def run(self, operation, **overrides):
+    def run_case(self, operation, **overrides):
         state={"head":HEAD,"open":True,"merged":False,"draft":False,"queued":False,"auto":False,"labels":["automerge"],"title":"Safe PR"}; state.update(overrides)
         self.state.write_text(json.dumps(state))
         args=[sys.executable,str(SCRIPT),operation,PR_URL,"--expected-head",HEAD]
@@ -78,28 +78,28 @@ class MergeTransactionTests(unittest.TestCase):
     def final(self): return json.loads(self.state.read_text())
 
     def test_revoke_removes_queue_and_auto_merge(self):
-        r=self.run("revoke", queued=True, auto=True); self.assertEqual(r.returncode,0,r.stderr); self.assertFalse(self.final()["queued"]); self.assertFalse(self.final()["auto"])
+        r=self.run_case("revoke", queued=True, auto=True); self.assertEqual(r.returncode,0,r.stderr); self.assertFalse(self.final()["queued"]); self.assertFalse(self.final()["auto"])
 
     def test_retire_revokes_before_close(self):
-        r=self.run("retire", queued=True, auto=True); self.assertEqual(r.returncode,0,r.stderr); self.assertFalse(self.final()["open"]); self.assertFalse(self.final()["merged"])
+        r=self.run_case("retire", queued=True, auto=True); self.assertEqual(r.returncode,0,r.stderr); self.assertFalse(self.final()["open"]); self.assertFalse(self.final()["merged"])
 
     def test_head_move_refuses_without_mutation(self):
-        r=self.run("revoke", head=OTHER, queued=True, auto=True); self.assertEqual(r.returncode,4); self.assertIn("head_moved",r.stderr); self.assertTrue(self.final()["queued"])
+        r=self.run_case("revoke", head=OTHER, queued=True, auto=True); self.assertEqual(r.returncode,4); self.assertIn("head_moved",r.stderr); self.assertTrue(self.final()["queued"])
 
     def test_revoke_fails_if_provider_does_not_remove_queue(self):
-        r=self.run("revoke", queued=True, dequeue_noop=True); self.assertEqual(r.returncode,4); self.assertIn("merge_queue_revocation_unverified",r.stderr)
+        r=self.run_case("revoke", queued=True, dequeue_noop=True); self.assertEqual(r.returncode,4); self.assertIn("merge_queue_revocation_unverified",r.stderr)
 
     def test_arm_revalidates_label_and_exact_head(self):
-        r=self.run("arm", labels=[]); self.assertEqual(r.returncode,4); self.assertIn("required_label_missing",r.stderr); self.assertFalse(self.final()["auto"])
+        r=self.run_case("arm", labels=[]); self.assertEqual(r.returncode,4); self.assertIn("required_label_missing",r.stderr); self.assertFalse(self.final()["auto"])
 
     def test_arm_records_live_authorization(self):
-        r=self.run("arm"); self.assertEqual(r.returncode,0,r.stderr); self.assertTrue(self.final()["auto"]); self.assertIn("Merge-Transaction-Status: armed",r.stdout)
+        r=self.run_case("arm"); self.assertEqual(r.returncode,0,r.stderr); self.assertTrue(self.final()["auto"]); self.assertIn("Merge-Transaction-Status: armed",r.stdout)
 
     def test_arm_rejects_superseded_title(self):
-        r=self.run("arm", title="[SUPERSEDED] old vehicle"); self.assertEqual(r.returncode,4); self.assertIn("title_rejected",r.stderr)
+        r=self.run_case("arm", title="[SUPERSEDED] old vehicle"); self.assertEqual(r.returncode,4); self.assertIn("title_rejected",r.stderr)
 
     def test_merge_race_during_revoke_is_typed_failure(self):
-        r=self.run("revoke", queued=True, merge_on_dequeue=True); self.assertEqual(r.returncode,4); self.assertIn("already_or_raced_merged",r.stderr)
+        r=self.run_case("revoke", queued=True, merge_on_dequeue=True); self.assertEqual(r.returncode,4); self.assertIn("already_or_raced_merged",r.stderr)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)
