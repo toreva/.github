@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Parse composite action manifest
+        run: |
+          ruby -e "require 'yaml'; doc = YAML.safe_load(File.read('actions/merge-transaction/action.yml'), aliases: true); abort 'missing composite runs' unless doc.is_a?(Hash) && doc.dig('runs', 'using') == 'composite' && doc.dig('runs', 'steps').is_a?(Array)"
       - name: Compile
         run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/test_merge_transaction.py
       - name: Provider-state regressions
