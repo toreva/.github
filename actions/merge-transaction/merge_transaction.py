@@ -4,7 +4,7 @@
 Policy stays in the caller. This module owns only GitHub provider truth:
 - revoke: exact-head observe -> dequeue -> disable auto-merge -> verify absent
 - retire: revoke -> close -> verify CLOSED/unmerged/unarmed
-- arm: live exact-head/state re-read -> reject replay/zero-delta -> optional
+- arm: live exact-head/state re-read -> reject replay/zero-effect -> optional
   label/title checks -> arm native auto-merge with compare-and-swap head ->
   verify merged or armed on same head
 
@@ -134,13 +134,87 @@ def label_names(snapshot: dict[str, Any]) -> set[str]:
     return {str(node.get("name")) for node in nodes if isinstance(node, dict) and node.get("name")}
 
 
-def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
-    """Refuse provider-observed replay or empty work before merge authorization.
+def _rest_pr_for_projection(pr: PullRequestRef, head: str, attempts: int = 4) -> dict[str, Any]:
+    """Read GitHub's prospective test merge, waiting only for mergeability computation.
 
-    GitHub itself is the ledger. This makes the invariant available to every
-    repository consuming the shared action, including PRs opened outside any
-    daemon-specific landing path.
+    GitHub computes `merge_commit_sha` for the repository state that would result
+    if this PR merged into its current base. That state, not the merge-base file
+    list, is the authoritative no-op predicate for squash/rebase history.
     """
+    for attempt in range(1, attempts + 1):
+        raw = run_gh(["api", f"repos/{pr.slug}/pulls/{pr.number}"])
+        payload = load_json(raw, "pr_projection_discovery_failed")
+        if not isinstance(payload, dict):
+            raise TxnError("pr_projection_discovery_failed:unexpected_shape")
+        provider_head = payload.get("head")
+        provider_head_sha = provider_head.get("sha") if isinstance(provider_head, dict) else None
+        if provider_head_sha != head:
+            raise TxnError(f"head_moved:expected={head}:actual={provider_head_sha or 'EMPTY'}")
+        mergeable = payload.get("mergeable")
+        if mergeable is None:
+            if attempt < attempts:
+                time.sleep(0.25 * attempt)
+                continue
+            raise TxnError("mergeability_unresolved")
+        if mergeable is not True:
+            raise TxnError("pr_not_mergeable")
+        merge_sha = payload.get("merge_commit_sha")
+        base = payload.get("base")
+        base_sha = base.get("sha") if isinstance(base, dict) else None
+        if not isinstance(merge_sha, str) or not merge_sha:
+            raise TxnError("test_merge_oid_missing")
+        if not isinstance(base_sha, str) or not base_sha:
+            raise TxnError("base_oid_missing")
+        return payload
+    raise TxnError("mergeability_unresolved")
+
+
+def _commit_tree(pr: PullRequestRef, commit_sha: str, code: str) -> str:
+    raw = run_gh(["api", f"repos/{pr.slug}/git/commits/{commit_sha}"])
+    payload = load_json(raw, code)
+    if not isinstance(payload, dict):
+        raise TxnError(f"{code}:unexpected_shape")
+    tree = payload.get("tree")
+    tree_sha = tree.get("sha") if isinstance(tree, dict) else None
+    if not isinstance(tree_sha, str) or not tree_sha:
+        raise TxnError(f"{code}:tree_oid_missing")
+    return tree_sha
+
+
+def _assert_branch_head_not_previously_consumed(pr: PullRequestRef, head: str, projection: dict[str, Any]) -> None:
+    """Close the common branch-reuse seam that commit association cannot guarantee.
+
+    Commit association remains useful, but squash merges do not make the source
+    commit an ancestor of default-branch history. A second provider index over the
+    current head label catches a deleted/recreated branch replay such as #2635 ->
+    #2636, while still comparing the immutable source SHA before refusing.
+    """
+    head_info = projection.get("head")
+    head_label = head_info.get("label") if isinstance(head_info, dict) else None
+    if not isinstance(head_label, str) or not head_label:
+        return
+    raw = run_gh([
+        "api", "--method", "GET", f"repos/{pr.slug}/pulls",
+        "-f", "state=closed", "-f", f"head={head_label}", "-f", "per_page=100",
+    ])
+    history = load_json(raw, "head_branch_history_failed")
+    if not isinstance(history, list):
+        raise TxnError("head_branch_history_failed:unexpected_shape")
+    for candidate in history:
+        if not isinstance(candidate, dict) or candidate.get("number") == pr.number:
+            continue
+        candidate_head = candidate.get("head")
+        candidate_sha = candidate_head.get("sha") if isinstance(candidate_head, dict) else None
+        merged_at = candidate.get("merged_at")
+        if candidate_sha == head and isinstance(merged_at, str) and merged_at:
+            raise TxnError(f"consumed_head_replay:pr={candidate.get('number')}:head={head}")
+
+
+def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
+    """Refuse provider-observed replay or a merge with zero repository effect."""
+    # Defense in depth: GitHub's commit association is useful but is not treated
+    # as the sole historical ledger because its results depend on repository
+    # reachability and merge topology.
     raw = run_gh(["api", f"repos/{pr.slug}/commits/{head}/pulls"])
     associated = load_json(raw, "head_owner_discovery_failed")
     if not isinstance(associated, list):
@@ -158,12 +232,17 @@ def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
         if str(candidate.get("state", "")).lower() == "open":
             raise TxnError(f"duplicate_live_head_owner:pr={candidate.get('number')}:head={head}")
 
-    files_raw = run_gh(["api", f"repos/{pr.slug}/pulls/{pr.number}/files?per_page=1"])
-    files = load_json(files_raw, "pr_delta_discovery_failed")
-    if not isinstance(files, list):
-        raise TxnError("pr_delta_discovery_failed:unexpected_shape")
-    if not files:
-        raise TxnError("zero_delta_pr")
+    projection = _rest_pr_for_projection(pr, head)
+    _assert_branch_head_not_previously_consumed(pr, head, projection)
+
+    base = projection.get("base") or {}
+    base_sha = base.get("sha") if isinstance(base, dict) else None
+    merge_sha = projection.get("merge_commit_sha")
+    assert isinstance(base_sha, str) and isinstance(merge_sha, str)
+    base_tree = _commit_tree(pr, base_sha, "base_tree_discovery_failed")
+    merge_tree = _commit_tree(pr, merge_sha, "test_merge_tree_discovery_failed")
+    if base_tree == merge_tree:
+        raise TxnError(f"zero_effect_merge:base={base_sha}:tree={base_tree}")
 
 
 def emit(operation: str, status: str, pr: PullRequestRef, head: str, **fields: Any) -> None:
