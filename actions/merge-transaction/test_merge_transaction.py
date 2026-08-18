@@ -13,6 +13,10 @@ SCRIPT = Path(__file__).with_name("merge_transaction.py")
 PR_URL = "https://github.com/example/service/pull/42"
 HEAD = "a" * 40
 OTHER = "b" * 40
+BASE = "c" * 40
+TEST_MERGE = "d" * 40
+BASE_TREE = "e" * 40
+MERGE_TREE = "f" * 40
 
 GH_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -51,8 +55,30 @@ if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/ser
   if state.get("consumed_head"): associated.append({"number":99,"state":"closed","merged_at":"2026-08-17T00:00:00Z","head":{"sha":state["head"]}})
   print(json.dumps(associated)); raise SystemExit(0)
 
-if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/service/pulls/42/files?"):
-  print("[]" if state.get("zero_delta") else json.dumps([{"filename":"src/app.py"}])); raise SystemExit(0)
+if args[:2] == ["api","repos/example/service/pulls/42"]:
+  reads = int(state.get("projection_reads", 0)) + 1
+  state["projection_reads"] = reads; save()
+  mergeable = state.get("mergeable", True)
+  if state.get("mergeability_unknown_once") and reads == 1: mergeable = None
+  payload = {
+    "number":42,"state":"open","merged":False,
+    "head":{"sha":state["head"],"label":state.get("head_label","example:feature")},
+    "base":{"sha":state.get("base", "c"*40)},
+    "mergeable":mergeable,
+    "merge_commit_sha":state.get("test_merge", "d"*40) if mergeable is True else None,
+  }
+  print(json.dumps(payload)); raise SystemExit(0)
+
+if args[:4] == ["api","--method","GET","repos/example/service/pulls"]:
+  history=[]
+  if state.get("branch_consumed"):
+    history.append({"number":99,"state":"closed","merged_at":"2026-08-17T00:00:00Z","head":{"sha":state["head"]}})
+  print(json.dumps(history)); raise SystemExit(0)
+
+if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/service/git/commits/"):
+  sha=args[1].rsplit("/",1)[-1]
+  tree = state.get("base_tree", "e"*40) if sha == state.get("base", "c"*40) else state.get("merge_tree", "f"*40)
+  print(json.dumps({"sha":sha,"tree":{"sha":tree}})); raise SystemExit(0)
 
 if args[:4] == ["api","--method","PATCH","repos/example/service/pulls/42"]:
   state["open"] = False; save(); print(json.dumps({"state":"closed"})); raise SystemExit(0)
@@ -78,7 +104,13 @@ class MergeTransactionTests(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def run_case(self, operation, **overrides):
-        state={"head":HEAD,"open":True,"merged":False,"draft":False,"queued":False,"auto":False,"labels":["automerge"],"title":"Safe PR"}; state.update(overrides)
+        state={
+            "head":HEAD,"base":BASE,"test_merge":TEST_MERGE,
+            "base_tree":BASE_TREE,"merge_tree":MERGE_TREE,
+            "open":True,"merged":False,"draft":False,"queued":False,"auto":False,
+            "labels":["automerge"],"title":"Safe PR",
+        }
+        state.update(overrides)
         self.state.write_text(json.dumps(state))
         args=[sys.executable,str(SCRIPT),operation,PR_URL,"--expected-head",HEAD]
         if operation=="arm": args += ["--required-label","automerge"]
@@ -112,11 +144,24 @@ class MergeTransactionTests(unittest.TestCase):
     def test_arm_rejects_duplicate_live_head_before_provider_mutation(self):
         r=self.run_case("arm", duplicate_live=True); self.assertEqual(r.returncode,4); self.assertIn("duplicate_live_head_owner",r.stderr); self.assertEqual(self.arm_calls(),[])
 
-    def test_arm_rejects_consumed_head_before_provider_mutation(self):
+    def test_arm_rejects_consumed_head_from_commit_association(self):
         r=self.run_case("arm", consumed_head=True); self.assertEqual(r.returncode,4); self.assertIn("consumed_head_replay",r.stderr); self.assertEqual(self.arm_calls(),[])
 
-    def test_arm_rejects_zero_delta_before_provider_mutation(self):
-        r=self.run_case("arm", zero_delta=True); self.assertEqual(r.returncode,4); self.assertIn("zero_delta_pr",r.stderr); self.assertEqual(self.arm_calls(),[])
+    def test_arm_rejects_consumed_head_from_recreated_branch_history(self):
+        r=self.run_case("arm", branch_consumed=True); self.assertEqual(r.returncode,4); self.assertIn("consumed_head_replay",r.stderr); self.assertEqual(self.arm_calls(),[])
+
+    def test_arm_rejects_squash_replay_by_prospective_tree_even_when_old_file_diff_would_be_nonempty(self):
+        r=self.run_case("arm", merge_tree=BASE_TREE)
+        self.assertEqual(r.returncode,4,r.stderr)
+        self.assertIn("zero_effect_merge",r.stderr)
+        self.assertEqual(self.arm_calls(),[])
+        self.assertFalse(any("/files?" in " ".join(call) for call in self.calls()))
+
+    def test_arm_waits_for_github_mergeability_computation(self):
+        r=self.run_case("arm", mergeability_unknown_once=True); self.assertEqual(r.returncode,0,r.stderr); self.assertEqual(self.final()["projection_reads"],2)
+
+    def test_arm_fails_closed_when_pr_is_not_mergeable(self):
+        r=self.run_case("arm", mergeable=False); self.assertEqual(r.returncode,4); self.assertIn("pr_not_mergeable",r.stderr); self.assertEqual(self.arm_calls(),[])
 
     def test_merge_race_during_revoke_is_typed_failure(self):
         r=self.run_case("revoke", queued=True, merge_on_dequeue=True); self.assertEqual(r.returncode,4); self.assertIn("already_or_raced_merged",r.stderr)
