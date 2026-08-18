@@ -23,8 +23,10 @@ jobs:
         run: |
           ruby -e "require 'yaml'; doc = YAML.safe_load(File.read('actions/merge-transaction/action.yml'), aliases: true); abort 'missing composite runs' unless doc.is_a?(Hash) && doc.dig('runs', 'using') == 'composite' && doc.dig('runs', 'steps').is_a?(Array)"
       - name: Compile
-        run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/fallback_provenance.py actions/merge-transaction/test_merge_transaction.py actions/merge-transaction/test_fallback_provenance.py
+        run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/fallback_provenance.py actions/merge-transaction/provider.py actions/merge-transaction/test_merge_transaction.py actions/merge-transaction/test_fallback_provenance.py actions/merge-transaction/test_provider.py
       - name: Provider-state regressions
         run: python3 actions/merge-transaction/test_merge_transaction.py -v
       - name: Fallback provenance regressions
         run: python3 actions/merge-transaction/test_fallback_provenance.py -v
+      - name: Provider composition regressions
+        run: python3 actions/merge-transaction/test_provider.py -v
