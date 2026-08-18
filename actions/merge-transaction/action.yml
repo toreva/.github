@@ -31,6 +31,14 @@ runs:
         TOREVA_MERGE_REJECT_TITLE_PREFIX: ${{ inputs.reject-title-prefix }}
       run: |
         set -euo pipefail
+        # Only authorization is provenance-gated. Revoke/retire must remain
+        # available even for an invalid execution vehicle so rollback cannot be
+        # trapped behind the control that detected the problem.
+        if [[ "$TOREVA_MERGE_OPERATION" == "arm" ]]; then
+          python3 "$GITHUB_ACTION_PATH/fallback_provenance.py" \
+            "$TOREVA_MERGE_PR_URL" \
+            --expected-head "$TOREVA_MERGE_EXPECTED_HEAD"
+        fi
         args=(
           "$TOREVA_MERGE_OPERATION"
           "$TOREVA_MERGE_PR_URL"
