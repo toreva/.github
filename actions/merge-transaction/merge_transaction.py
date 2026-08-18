@@ -4,8 +4,8 @@
 Policy stays in the caller. This module owns only GitHub provider truth:
 - revoke: exact-head observe -> dequeue -> disable auto-merge -> verify absent
 - retire: revoke -> close -> verify CLOSED/unmerged/unarmed
-- arm: live exact-head/state re-read -> reject replay/zero-effect -> optional
-  label/title checks -> arm native auto-merge with compare-and-swap head ->
+- arm: live exact-head/state re-read -> reject stale-base/replay/zero-effect ->
+  optional label/title checks -> arm native auto-merge with compare-and-swap head ->
   verify merged or armed on same head
 
 Exit 0 means the requested provider state was re-observed. Exit 4 is a typed
@@ -169,6 +169,37 @@ def _rest_pr_for_projection(pr: PullRequestRef, head: str, attempts: int = 4) ->
     raise TxnError("mergeability_unresolved")
 
 
+def _assert_live_base_ancestry(pr: PullRequestRef, head: str, projection: dict[str, Any]) -> None:
+    """Require the exact head to contain GitHub's current base before authorization.
+
+    A workflow run can start after the base moved while still testing an older
+    event/merge ref. Provider admission therefore proves live base ancestry
+    directly instead of inferring freshness from run timestamps.
+    """
+    base = projection.get("base")
+    base_sha = base.get("sha") if isinstance(base, dict) else None
+    base_ref = base.get("ref") if isinstance(base, dict) else None
+    if not isinstance(base_sha, str) or not base_sha:
+        raise TxnError("base_oid_missing")
+
+    raw = run_gh(["api", f"repos/{pr.slug}/compare/{base_sha}...{head}"])
+    comparison = load_json(raw, "live_base_compare_failed")
+    if not isinstance(comparison, dict):
+        raise TxnError("live_base_compare_failed:unexpected_shape")
+
+    behind = comparison.get("behind_by")
+    merge_base = comparison.get("merge_base_commit")
+    merge_base_sha = merge_base.get("sha") if isinstance(merge_base, dict) else None
+    if behind != 0 or merge_base_sha != base_sha:
+        raise TxnError(
+            "stale_base:"
+            f"base_ref={base_ref or 'unknown'}:"
+            f"base={base_sha}:head={head}:"
+            f"behind={behind if isinstance(behind, int) else 'unknown'}:"
+            f"merge_base={merge_base_sha or 'missing'}"
+        )
+
+
 def _commit_tree(pr: PullRequestRef, commit_sha: str, code: str) -> str:
     raw = run_gh(["api", f"repos/{pr.slug}/git/commits/{commit_sha}"])
     payload = load_json(raw, code)
@@ -211,7 +242,7 @@ def _assert_branch_head_not_previously_consumed(pr: PullRequestRef, head: str, p
 
 
 def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
-    """Refuse provider-observed replay or a merge with zero repository effect."""
+    """Refuse stale-base, provider-observed replay, or a zero-effect merge."""
     # Defense in depth: GitHub's commit association is useful but is not treated
     # as the sole historical ledger because its results depend on repository
     # reachability and merge topology.
@@ -233,6 +264,7 @@ def assert_arm_provider_admission(pr: PullRequestRef, head: str) -> None:
             raise TxnError(f"duplicate_live_head_owner:pr={candidate.get('number')}:head={head}")
 
     projection = _rest_pr_for_projection(pr, head)
+    _assert_live_base_ancestry(pr, head, projection)
     _assert_branch_head_not_previously_consumed(pr, head, projection)
 
     base = projection.get("base") or {}
