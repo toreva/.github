@@ -17,6 +17,7 @@ BASE = "c" * 40
 TEST_MERGE = "d" * 40
 BASE_TREE = "e" * 40
 MERGE_TREE = "f" * 40
+OLD_BASE = "9" * 40
 
 GH_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -63,11 +64,19 @@ if args[:2] == ["api","repos/example/service/pulls/42"]:
   payload = {
     "number":42,"state":"open","merged":False,
     "head":{"sha":state["head"],"label":state.get("head_label","example:feature")},
-    "base":{"sha":state.get("base", "c"*40)},
+    "base":{"ref":"main","sha":state.get("base", "c"*40)},
     "mergeable":mergeable,
     "merge_commit_sha":state.get("test_merge", "d"*40) if mergeable is True else None,
   }
   print(json.dumps(payload)); raise SystemExit(0)
+
+if len(args) >= 2 and args[0] == "api" and args[1].startswith("repos/example/service/compare/"):
+  base_sha = state.get("base", "c"*40)
+  if state.get("stale_base"):
+    print(json.dumps({"status":"diverged","behind_by":1,"ahead_by":1,"merge_base_commit":{"sha":"9"*40}}))
+  else:
+    print(json.dumps({"status":"ahead","behind_by":0,"ahead_by":1,"merge_base_commit":{"sha":base_sha}}))
+  raise SystemExit(0)
 
 if args[:4] == ["api","--method","GET","repos/example/service/pulls"]:
   history=[]
@@ -140,6 +149,12 @@ class MergeTransactionTests(unittest.TestCase):
 
     def test_arm_rejects_superseded_title(self):
         r=self.run_case("arm", title="[SUPERSEDED] old vehicle"); self.assertEqual(r.returncode,4); self.assertIn("title_rejected",r.stderr)
+
+    def test_arm_rejects_stale_base_before_provider_mutation(self):
+        r=self.run_case("arm", stale_base=True)
+        self.assertEqual(r.returncode,4,r.stderr)
+        self.assertIn("stale_base",r.stderr)
+        self.assertEqual(self.arm_calls(),[])
 
     def test_arm_rejects_duplicate_live_head_before_provider_mutation(self):
         r=self.run_case("arm", duplicate_live=True); self.assertEqual(r.returncode,4); self.assertIn("duplicate_live_head_owner",r.stderr); self.assertEqual(self.arm_calls(),[])
