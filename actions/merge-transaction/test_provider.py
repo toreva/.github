@@ -15,10 +15,11 @@ HEAD = "a" * 40
 PR = "https://github.com/example/service/pull/42"
 
 CORE = '''#!/usr/bin/env python3
-import os
+import json, os
 class TxnError(RuntimeError): pass
 class PullRequestRef:
-    def __init__(self, url): self.url=url
+    def __init__(self, url):
+        self.url=url; self.slug="example/service"; self.number=42
 
 def _log(name):
     with open(os.environ["PROVIDER_LOG"], "a") as fh: fh.write(name+"\\n")
@@ -28,6 +29,10 @@ def revoke(pr, expected): _log("revoke"); return expected, {"pr_state":"OPEN"}
 def retire(pr, expected): _log("retire")
 def arm(pr, expected, required_label, reject_title_prefix): _log("core_arm")
 def emit(*args, **kwargs): _log("emit")
+def run_gh(args):
+    _log("provider_read")
+    return json.dumps({"head":{"sha":"a"*40},"body":os.environ.get("PR_BODY","")})
+def load_json(raw, code): return json.loads(raw)
 '''
 PROVENANCE = '''#!/usr/bin/env python3
 import os
@@ -45,8 +50,12 @@ class ProviderFacadeTests(unittest.TestCase):
         (root / "merge_transaction.py").write_text(CORE)
         (root / "fallback_provenance.py").write_text(PROVENANCE)
         self.log=root / "log.txt"; self.log.write_text("")
-        self.old_log=os.environ.get("PROVIDER_LOG"); self.old_refuse=os.environ.get("PROVENANCE_REFUSE")
-        os.environ["PROVIDER_LOG"]=str(self.log); os.environ.pop("PROVENANCE_REFUSE",None)
+        self.old_log=os.environ.get("PROVIDER_LOG")
+        self.old_refuse=os.environ.get("PROVENANCE_REFUSE")
+        self.old_body=os.environ.get("PR_BODY")
+        os.environ["PROVIDER_LOG"]=str(self.log)
+        os.environ.pop("PROVENANCE_REFUSE",None)
+        os.environ.pop("PR_BODY",None)
         self.root=root
 
     def tearDown(self):
@@ -54,6 +63,8 @@ class ProviderFacadeTests(unittest.TestCase):
         else: os.environ["PROVIDER_LOG"]=self.old_log
         if self.old_refuse is None: os.environ.pop("PROVENANCE_REFUSE",None)
         else: os.environ["PROVENANCE_REFUSE"]=self.old_refuse
+        if self.old_body is None: os.environ.pop("PR_BODY",None)
+        else: os.environ["PR_BODY"]=self.old_body
         self.tmp.cleanup()
 
     def module(self):
@@ -62,18 +73,38 @@ class ProviderFacadeTests(unittest.TestCase):
 
     def calls(self): return self.log.read_text().splitlines()
 
-    def test_import_api_arm_runs_provenance_before_core(self):
+    def test_import_api_arm_runs_terminal_separation_and_provenance_before_core(self):
         mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text("")
         mod.arm(pr,HEAD,"","[SUPERSEDED")
-        self.assertEqual(self.calls(),["provenance","core_arm"])
+        self.assertEqual(self.calls(),["provider_read","provenance","core_arm"])
 
-    def test_import_api_refusal_prevents_core_arm(self):
+    def test_import_api_provenance_refusal_prevents_core_arm(self):
         mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text(""); os.environ["PROVENANCE_REFUSE"]="1"
         with self.assertRaises(mod.TxnError): mod.arm(pr,HEAD,"","[SUPERSEDED")
-        self.assertEqual(self.calls(),["provenance"])
+        self.assertEqual(self.calls(),["provider_read","provenance"])
 
-    def test_revoke_and_retire_remain_provenance_independent(self):
-        mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text(""); os.environ["PROVENANCE_REFUSE"]="1"
+    def test_arm_refuses_conditional_issue_autoclose_before_provenance_or_merge(self):
+        mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text("")
+        os.environ["PR_BODY"]="Closes #2642 when merged and hot-activated."
+        with self.assertRaisesRegex(mod.TxnError,"issue_autoclose_keyword_forbidden"):
+            mod.arm(pr,HEAD,"","[SUPERSEDED")
+        self.assertEqual(self.calls(),["provider_read"])
+
+    def test_arm_refuses_cross_repo_autoclose_reference(self):
+        mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text("")
+        os.environ["PR_BODY"]="Fixes goblin-agent/coordinator#2642 after runtime proof."
+        with self.assertRaisesRegex(mod.TxnError,"issue_autoclose_keyword_forbidden"):
+            mod.arm(pr,HEAD,"","[SUPERSEDED")
+        self.assertEqual(self.calls(),["provider_read"])
+
+    def test_non_terminal_close_language_does_not_false_positive(self):
+        mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text("")
+        os.environ["PR_BODY"]="This closes the source composition gap. Refs #2642 for runtime proof."
+        mod.arm(pr,HEAD,"","[SUPERSEDED")
+        self.assertEqual(self.calls(),["provider_read","provenance","core_arm"])
+
+    def test_revoke_and_retire_remain_admission_independent(self):
+        mod=self.module(); pr=mod.parse_pr_url(PR); self.log.write_text(""); os.environ["PROVENANCE_REFUSE"]="1"; os.environ["PR_BODY"]="Closes #2642"
         mod.revoke(pr,HEAD); mod.retire(pr,HEAD)
         self.assertEqual(self.calls(),["revoke","retire"])
 
@@ -81,6 +112,6 @@ class ProviderFacadeTests(unittest.TestCase):
         env=os.environ.copy(); env["PROVIDER_LOG"]=str(self.log); self.log.write_text("")
         r=subprocess.run([sys.executable,str(self.root/"provider.py"),"arm",PR,"--expected-head",HEAD],env=env,text=True,capture_output=True,check=False)
         self.assertEqual(r.returncode,0,r.stderr)
-        self.assertEqual(self.calls(),["parse","provenance","core_arm"])
+        self.assertEqual(self.calls(),["parse","provider_read","provenance","core_arm"])
 
 if __name__ == "__main__": unittest.main(verbosity=2)
