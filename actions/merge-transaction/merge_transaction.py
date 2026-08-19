@@ -74,6 +74,37 @@ def parse_pr_url(value: str) -> PullRequestRef:
         raise TxnError("invalid_pr_url")
     return PullRequestRef(match.group("owner"), match.group("repo"), int(match.group("number")), value.rstrip("/"))
 
+# GitHub answers an under-permissioned auto-merge mutation with a message that
+# names a permission nobody declared:
+#
+#   Resource not accessible by integration (enablePullRequestAutoMerge)
+#
+# Enabling or disabling auto-merge writes to the base branch, so the token needs
+# `contents: write`; `pull-requests: write` alone is refused. This is not
+# documented, so it was measured — two jobs identical but for `contents:`, both
+# firing the real mutation at a throwaway PR (goblin-agent/goblin_infra#820):
+# read -> refused, write -> armed and landed.
+#
+# On 2026-08-19 every consumer of this action had shipped `contents: read`, and
+# the raw message sent four repos across two orgs looking for a transport fault
+# that was never there. Naming the cause here fixes it once for every consumer,
+# including ones that do not exist yet.
+PERMISSION_DENIED = re.compile(r"resource not accessible by integration", re.IGNORECASE)
+
+TOKEN_AUTHORITY_REMEDY = (
+    "insufficient_token_authority:contents_write_required "
+    "(auto-merge mutations write to the base branch; add "
+    "permissions:{contents: write, pull-requests: write} to this job. "
+    "Measured: goblin-agent/goblin_infra#820). provider_said="
+)
+
+
+def classify_transport_failure(message: str) -> str:
+    """Name the cause when the provider refused for want of authority."""
+    if PERMISSION_DENIED.search(message):
+        return TOKEN_AUTHORITY_REMEDY + message
+    return "github_transport_failed:" + message
+
 
 def run_gh(args: list[str], attempts: int = 3) -> str:
     last = ""
@@ -82,9 +113,13 @@ def run_gh(args: list[str], attempts: int = 3) -> str:
         if result.returncode == 0:
             return result.stdout
         last = (result.stderr or result.stdout or "gh_failed").strip()[:400]
+        # Retry reads, not effects. A permission refusal is permanent: retrying
+        # it burns provider budget and delays the only useful output, the cause.
+        if PERMISSION_DENIED.search(last):
+            break
         if attempt < attempts:
             time.sleep(0.2 * attempt)
-    raise TxnError(f"github_transport_failed:{last}")
+    raise TxnError(classify_transport_failure(last))
 
 
 def load_json(raw: str, code: str) -> Any:
@@ -112,7 +147,10 @@ def mutate(mutation: str, pr_id: str) -> None:
     raw = run_gh(["api", "graphql", "-f", f"query={mutation}", "-F", f"pullRequestId={pr_id}"])
     payload = load_json(raw, "github_graphql_mutation_failed")
     if payload.get("errors"):
-        raise TxnError(f"github_graphql_mutation_failed:{payload['errors'][0].get('message', 'graphql_error')}")
+        message = payload["errors"][0].get("message", "graphql_error")
+        if PERMISSION_DENIED.search(message):
+            raise TxnError(TOKEN_AUTHORITY_REMEDY + message)
+        raise TxnError(f"github_graphql_mutation_failed:{message}")
 
 
 def exact_head(snapshot: dict[str, Any], expected: str) -> str:

@@ -183,3 +183,66 @@ class MergeTransactionTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)
+
+
+def _load_merge_transaction():
+    """Import the action module in-process for pure-function assertions.
+    The suite otherwise drives the script as a subprocess behind a gh stub."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("merge_transaction", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    # @dataclass resolves annotations via sys.modules, so register before exec.
+    sys.modules["merge_transaction"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+mt = _load_merge_transaction()
+
+
+class TokenAuthorityClassification(unittest.TestCase):
+    """The 2026-08-19 fleet-red incident: the provider refused for want of
+    `contents: write` and the raw message named a permission nobody declared,
+    so four repos across two orgs hunted a transport fault that never existed."""
+
+    REAL_MESSAGE = (
+        "GraphQL: Resource not accessible by integration (enablePullRequestAutoMerge)"
+    )
+
+    def test_permission_refusal_is_named_not_reported_as_transport(self):
+        got = mt.classify_transport_failure(self.REAL_MESSAGE)
+        self.assertTrue(got.startswith("insufficient_token_authority:contents_write_required"))
+        self.assertIn("contents: write", got)
+        self.assertNotIn("github_transport_failed", got)
+
+    def test_revoke_side_message_is_classified_too(self):
+        got = mt.classify_transport_failure("gh: Resource not accessible by integration")
+        self.assertIn("insufficient_token_authority", got)
+
+    def test_genuine_transport_faults_keep_their_existing_code(self):
+        got = mt.classify_transport_failure("dial tcp: i/o timeout")
+        self.assertTrue(got.startswith("github_transport_failed:"))
+
+    def test_permission_refusal_is_not_retried(self):
+        calls = []
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = self.REAL_MESSAGE
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return Result()
+
+        original = mt.subprocess.run
+        mt.subprocess.run = fake_run
+        try:
+            with self.assertRaises(mt.TxnError) as ctx:
+                mt.run_gh(["api", "graphql"], attempts=3)
+        finally:
+            mt.subprocess.run = original
+
+        self.assertEqual(len(calls), 1, "a permanent refusal must fail on observation one")
+        self.assertIn("insufficient_token_authority", str(ctx.exception))
