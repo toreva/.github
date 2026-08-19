@@ -1,8 +1,8 @@
 name: Toreva merge transaction
-description: 'Exact-head GitHub merge provider transaction: revoke, retire, or arm native auto-merge.'
+description: 'Exact-head GitHub merge provider transaction: hold, revoke, retire, or arm native auto-merge.'
 inputs:
   operation:
-    description: revoke, retire, or arm
+    description: hold, revoke, retire, or arm
     required: true
   pr-url:
     description: Full GitHub pull request URL
