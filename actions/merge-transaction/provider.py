@@ -5,11 +5,13 @@
 both CLI- and import-compatible with that engine, and owns the cross-cutting
 admissions every live arm caller must share:
 
-* daemon fallback provenance must be coherent; and
+* daemon fallback provenance must be coherent;
 * an auto-merged source vehicle must not also mutate issue terminal state via
-  GitHub closing keywords.
+  GitHub closing keywords; and
+* a live STOP control can persist a merge hold before revoking queue/auto-merge.
 
-Revoke/retire deliberately bypass these admissions so rollback stays available.
+Revoke/retire/hold deliberately bypass arm admissions so rollback and emergency
+containment stay available.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from types import ModuleType
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
+HOLD_LABEL = "merge-hold"
 
 # GitHub recognizes these keyword/reference shapes and closes linked issues when
 # the PR reaches the default branch. Source merge is not operational completion,
@@ -85,6 +88,53 @@ def assert_issue_terminal_separation(pr: Any, expected: str) -> None:
         raise TxnError("issue_autoclose_keyword_forbidden:source_merge_is_not_terminal")
 
 
+def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
+    """Persist a merge hold, then revoke all live merge authorization.
+
+    The durable label is written before dequeue/disable. If provider revocation
+    later fails, the existing fleet hold reconciler can still observe the label
+    and retry. Every phase is exact-head checked so a STOP for one source cannot
+    silently attach authority to a moved PR head.
+    """
+    before = query_pr(pr)
+    head = _core.exact_head(before, expected)
+    _core.assert_unmerged(before, "before_hold")
+
+    # GitHub's issue-label endpoint backs PR labels. Use the existing provider
+    # transport so auth/retry/failure semantics stay in one primitive.
+    raw = _core.run_gh(
+        [
+            "api",
+            "--method",
+            "POST",
+            f"repos/{pr.slug}/issues/{pr.number}/labels",
+            "-f",
+            f"labels[]={HOLD_LABEL}",
+        ]
+    )
+    payload = _core.load_json(raw, "merge_hold_label_write_failed")
+    if not isinstance(payload, list):
+        raise TxnError("merge_hold_label_write_failed:unexpected_shape")
+
+    labeled = query_pr(pr)
+    _core.exact_head(labeled, head)
+    _core.assert_unmerged(labeled, "after_hold_label")
+    if HOLD_LABEL not in _core.label_names(labeled):
+        raise TxnError("merge_hold_label_unverified")
+
+    head, fields = revoke(pr, head)
+    final = query_pr(pr)
+    _core.exact_head(final, head)
+    _core.assert_unmerged(final, "after_hold_revoke")
+    if HOLD_LABEL not in _core.label_names(final):
+        raise TxnError("merge_hold_label_lost")
+    if isinstance(final.get("mergeQueueEntry"), dict):
+        raise TxnError("merge_hold_queue_revocation_unverified")
+    if isinstance(final.get("autoMergeRequest"), dict):
+        raise TxnError("merge_hold_auto_merge_revocation_unverified")
+    return head, {**fields, "merge_hold_label": HOLD_LABEL}
+
+
 def arm(pr: Any, expected: str, required_label: str, reject_title_prefix: str) -> None:
     assert_issue_terminal_separation(pr, expected)
     try:
@@ -96,7 +146,7 @@ def arm(pr: Any, expected: str, required_label: str, reject_title_prefix: str) -
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["revoke", "retire", "arm"])
+    parser.add_argument("operation", choices=["hold", "revoke", "retire", "arm"])
     parser.add_argument("pr_url")
     parser.add_argument("--expected-head", required=True)
     parser.add_argument("--required-label", default="")
@@ -104,7 +154,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         pr = parse_pr_url(args.pr_url)
-        if args.operation == "revoke":
+        if args.operation == "hold":
+            head, fields = hold(pr, args.expected_head)
+            emit("hold", "held", pr, head, **fields)
+        elif args.operation == "revoke":
             head, fields = revoke(pr, args.expected_head)
             emit("revoke", "revoked", pr, head, **fields)
         elif args.operation == "retire":
