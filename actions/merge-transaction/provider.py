@@ -25,6 +25,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 HOLD_LABEL = "merge-hold"
+HOLD_LABEL_COLOR = "B60205"
+HOLD_LABEL_DESCRIPTION = "Machine-enforced merge hold; explicit release required"
 
 # GitHub recognizes these keyword/reference shapes and closes linked issues when
 # the PR reaches the default branch. Source merge is not operational completion,
@@ -88,20 +90,22 @@ def assert_issue_terminal_separation(pr: Any, expected: str) -> None:
         raise TxnError("issue_autoclose_keyword_forbidden:source_merge_is_not_terminal")
 
 
-def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
-    """Persist a merge hold, then revoke all live merge authorization.
-
-    The durable label is written before dequeue/disable. If provider revocation
-    later fails, the existing fleet hold reconciler can still observe the label
-    and retry. Every phase is exact-head checked so a STOP for one source cannot
-    silently attach authority to a moved PR head.
-    """
-    before = query_pr(pr)
-    head = _core.exact_head(before, expected)
-    _core.assert_unmerged(before, "before_hold")
-
-    # GitHub's issue-label endpoint backs PR labels. Use the existing provider
-    # transport so auth/retry/failure semantics stay in one primitive.
+def _persist_hold_label(pr: Any) -> None:
+    """Provision and apply the fleet-standard merge-hold label idempotently."""
+    _core.run_gh(
+        [
+            "label",
+            "create",
+            HOLD_LABEL,
+            "--repo",
+            pr.slug,
+            "--color",
+            HOLD_LABEL_COLOR,
+            "--description",
+            HOLD_LABEL_DESCRIPTION,
+            "--force",
+        ]
+    )
     raw = _core.run_gh(
         [
             "api",
@@ -115,6 +119,21 @@ def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
     payload = _core.load_json(raw, "merge_hold_label_write_failed")
     if not isinstance(payload, list):
         raise TxnError("merge_hold_label_write_failed:unexpected_shape")
+
+
+def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
+    """Persist a merge hold, then revoke all live merge authorization.
+
+    The durable label is written before dequeue/disable. If provider revocation
+    later fails, the existing fleet hold reconciler can still observe the label
+    and retry. Every phase is exact-head checked so a STOP for one source cannot
+    silently attach authority to a moved PR head.
+    """
+    before = query_pr(pr)
+    head = _core.exact_head(before, expected)
+    _core.assert_unmerged(before, "before_hold")
+
+    _persist_hold_label(pr)
 
     labeled = query_pr(pr)
     _core.exact_head(labeled, head)
