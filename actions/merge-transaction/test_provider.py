@@ -109,6 +109,22 @@ class ProviderFacadeTests(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines()
 
+    def test_import_api_admit_checks_terminal_separation_only(self):
+        mod = self.module()
+        pr = mod.parse_pr_url(PR)
+        self.log.write_text("")
+        mod.admit(pr, HEAD)
+        self.assertEqual(self.calls(), ["provider_read"])
+
+    def test_import_api_admit_refuses_issue_autoclose_without_mutation(self):
+        mod = self.module()
+        pr = mod.parse_pr_url(PR)
+        self.log.write_text("")
+        os.environ["PR_BODY"] = "Closes #2642 when merged and hot-activated."
+        with self.assertRaisesRegex(mod.TxnError, "issue_autoclose_keyword_forbidden"):
+            mod.admit(pr, HEAD)
+        self.assertEqual(self.calls(), ["provider_read"])
+
     def test_import_api_arm_runs_terminal_separation_and_provenance_before_core(self):
         mod = self.module()
         pr = mod.parse_pr_url(PR)
@@ -172,6 +188,20 @@ class ProviderFacadeTests(unittest.TestCase):
         mod.revoke(pr, HEAD)
         mod.retire(pr, HEAD)
         self.assertEqual(self.calls(), ["revoke", "retire"])
+
+    def test_cli_admit_is_read_only_and_emits_success(self):
+        env = os.environ.copy()
+        env["PROVIDER_LOG"] = str(self.log)
+        self.log.write_text("")
+        r = subprocess.run(
+            [sys.executable, str(self.root / "provider.py"), "admit", PR, "--expected-head", HEAD],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), ["parse", "provider_read", "emit"])
 
     def test_cli_arm_uses_same_facade_arm(self):
         env = os.environ.copy()
