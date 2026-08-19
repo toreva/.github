@@ -104,4 +104,4 @@ runs:
         set -euo pipefail
         : "${GH_TOKEN:?GH_TOKEN is required}"
         gh pr comment "$TOREVA_PR_NUMBER" --repo "$TOREVA_OWNER_REPO" --body \
-          "MERGE-HOLD-APPLIED control=${TOREVA_CONTROL} head=${TOREVA_HEAD} source_comment=${TOREVA_SOURCE_COMMENT}; provider=${GITHUB_ACTION_REPOSITORY}@${GITHUB_ACTION_REF}. Persistent merge-hold was re-observed and merge authorization revoked."
+          "MERGE-HOLD-APPLIED control=${TOREVA_CONTROL} head=${TOREVA_HEAD} source_comment=${TOREVA_SOURCE_COMMENT}; provider=shared-trusted-merge-hold. Persistent merge-hold was re-observed and merge authorization revoked."
