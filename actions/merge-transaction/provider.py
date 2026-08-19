@@ -3,13 +3,15 @@
 
 `merge_transaction.py` remains the mature provider-state engine. This facade is
 both CLI- and import-compatible with that engine, and owns the cross-cutting
-admissions every live arm caller must share:
+admissions every live landing path must share:
 
-* daemon fallback provenance must be coherent;
-* an auto-merged source vehicle must not also mutate issue terminal state via
-  GitHub closing keywords; and
+* daemon fallback provenance must be coherent before autonomous arm;
+* a source vehicle must not also mutate issue terminal state via GitHub closing
+  keywords; and
 * a live STOP control can persist a merge hold before revoking queue/auto-merge.
 
+`admit` exposes the terminal-separation check without provider mutation so repos
+whose actual landing authority is GitHub merge queue can reuse the same rule.
 Revoke/retire/hold deliberately bypass arm admissions so rollback and emergency
 containment stay available.
 """
@@ -30,7 +32,7 @@ HOLD_LABEL_DESCRIPTION = "Machine-enforced merge hold; explicit release required
 
 # GitHub recognizes these keyword/reference shapes and closes linked issues when
 # the PR reaches the default branch. Source merge is not operational completion,
-# so autonomous arm must keep the two state transitions separate.
+# so every machine landing path must keep the two state transitions separate.
 ISSUE_AUTOCLOSE_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
     r"(?:#\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|"
@@ -65,9 +67,9 @@ emit = _core.emit
 
 
 def assert_issue_terminal_separation(pr: Any, expected: str) -> None:
-    """Refuse GitHub auto-close side effects before provider merge authorization.
+    """Refuse GitHub auto-close side effects before a source landing.
 
-    Re-read REST provider truth here rather than trusting the workflow event body.
+    Re-read REST provider truth rather than trusting the workflow event body.
     The head compare-and-swap is repeated so a moved head cannot borrow an earlier
     admissible body read.
     """
@@ -88,6 +90,11 @@ def assert_issue_terminal_separation(pr: Any, expected: str) -> None:
         raise TxnError("pr_terminal_separation_discovery_failed:body_not_string")
     if ISSUE_AUTOCLOSE_RE.search(body):
         raise TxnError("issue_autoclose_keyword_forbidden:source_merge_is_not_terminal")
+
+
+def admit(pr: Any, expected: str) -> None:
+    """Run shared non-mutating source/terminal admission on an exact live head."""
+    assert_issue_terminal_separation(pr, expected)
 
 
 def _persist_hold_label(pr: Any) -> None:
@@ -155,7 +162,7 @@ def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
 
 
 def arm(pr: Any, expected: str, required_label: str, reject_title_prefix: str) -> None:
-    assert_issue_terminal_separation(pr, expected)
+    admit(pr, expected)
     try:
         _provenance.admit(pr.url, expected)
     except _provenance.AdmissionError as exc:
@@ -165,7 +172,7 @@ def arm(pr: Any, expected: str, required_label: str, reject_title_prefix: str) -
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["hold", "revoke", "retire", "arm"])
+    parser.add_argument("operation", choices=["hold", "revoke", "retire", "admit", "arm"])
     parser.add_argument("pr_url")
     parser.add_argument("--expected-head", required=True)
     parser.add_argument("--required-label", default="")
@@ -181,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
             emit("revoke", "revoked", pr, head, **fields)
         elif args.operation == "retire":
             retire(pr, args.expected_head)
+        elif args.operation == "admit":
+            admit(pr, args.expected_head)
+            emit("admit", "admitted", pr, args.expected_head)
         else:
             arm(pr, args.expected_head, args.required_label, args.reject_title_prefix)
         return 0
