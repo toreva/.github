@@ -1,0 +1,107 @@
+name: Toreva trusted merge hold
+description: Persist a trusted issue-comment STOP as exact-head merge-hold state immediately.
+inputs:
+  pr-url:
+    description: Full GitHub pull request URL for the issue_comment event.
+    required: true
+  comment-body:
+    description: Exact issue comment body from the trusted event.
+    required: true
+  author-association:
+    description: GitHub author_association from the issue comment.
+    required: true
+  source-comment-id:
+    description: GitHub issue comment id for the machine receipt.
+    required: false
+    default: ''
+outputs:
+  active:
+    description: true when the comment was an authoritative STOP/merge-hold control.
+    value: ${{ steps.classify.outputs.active }}
+  control:
+    description: Classified control token when active.
+    value: ${{ steps.classify.outputs.control }}
+runs:
+  using: composite
+  steps:
+    - name: Classify trusted STOP control
+      id: classify
+      shell: bash
+      env:
+        TOREVA_COMMENT_BODY: ${{ inputs.comment-body }}
+        TOREVA_AUTHOR_ASSOCIATION: ${{ inputs.author-association }}
+      run: |
+        set -euo pipefail
+        set +e
+        control="$(python3 "$GITHUB_ACTION_PATH/control.py" \
+          --association "$TOREVA_AUTHOR_ASSOCIATION" \
+          --body "$TOREVA_COMMENT_BODY")"
+        status=$?
+        set -e
+        case "$status" in
+          0)
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "control=$control" >> "$GITHUB_OUTPUT"
+            ;;
+          3)
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "control=NONE" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "trusted merge-control classifier failed with exit $status" >&2
+            exit "$status"
+            ;;
+        esac
+
+    - name: Resolve exact live PR head
+      if: steps.classify.outputs.active == 'true'
+      id: pr
+      shell: bash
+      env:
+        TOREVA_PR_URL: ${{ inputs.pr-url }}
+      run: |
+        set -euo pipefail
+        : "${GH_TOKEN:?GH_TOKEN is required}"
+        pr_path="${TOREVA_PR_URL#https://github.com/}"
+        owner_repo="${pr_path%/pull/*}"
+        number="${pr_path##*/pull/}"
+        if [[ "$owner_repo" == "$pr_path" || ! "$number" =~ ^[1-9][0-9]*$ ]]; then
+          echo "invalid GitHub PR URL: $TOREVA_PR_URL" >&2
+          exit 4
+        fi
+        head="$(gh api "repos/${owner_repo}/pulls/${number}" --jq '.head.sha')"
+        if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "invalid live PR head: ${head:-EMPTY}" >&2
+          exit 4
+        fi
+        echo "head=$head" >> "$GITHUB_OUTPUT"
+        echo "number=$number" >> "$GITHUB_OUTPUT"
+        echo "owner_repo=$owner_repo" >> "$GITHUB_OUTPUT"
+
+    - name: Persist merge-hold and revoke provider authorization
+      if: steps.classify.outputs.active == 'true'
+      shell: bash
+      env:
+        TOREVA_PR_URL: ${{ inputs.pr-url }}
+        TOREVA_EXPECTED_HEAD: ${{ steps.pr.outputs.head }}
+      run: |
+        set -euo pipefail
+        : "${GH_TOKEN:?GH_TOKEN is required}"
+        python3 "$GITHUB_ACTION_PATH/../merge-transaction/provider.py" \
+          hold "$TOREVA_PR_URL" \
+          --expected-head "$TOREVA_EXPECTED_HEAD"
+
+    - name: Publish machine receipt
+      if: steps.classify.outputs.active == 'true'
+      shell: bash
+      env:
+        TOREVA_OWNER_REPO: ${{ steps.pr.outputs.owner_repo }}
+        TOREVA_PR_NUMBER: ${{ steps.pr.outputs.number }}
+        TOREVA_HEAD: ${{ steps.pr.outputs.head }}
+        TOREVA_CONTROL: ${{ steps.classify.outputs.control }}
+        TOREVA_SOURCE_COMMENT: ${{ inputs.source-comment-id }}
+      run: |
+        set -euo pipefail
+        : "${GH_TOKEN:?GH_TOKEN is required}"
+        gh pr comment "$TOREVA_PR_NUMBER" --repo "$TOREVA_OWNER_REPO" --body \
+          "MERGE-HOLD-APPLIED control=${TOREVA_CONTROL} head=${TOREVA_HEAD} source_comment=${TOREVA_SOURCE_COMMENT}; provider=${GITHUB_ACTION_REPOSITORY}@${GITHUB_ACTION_REF}. Persistent merge-hold was re-observed and merge authorization revoked."
