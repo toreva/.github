@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - 'actions/merge-transaction/**'
+      - 'actions/trusted-merge-hold/**'
       - '.github/workflows/test-merge-transaction.yml'
   push:
     branches: [main]
     paths:
       - 'actions/merge-transaction/**'
+      - 'actions/trusted-merge-hold/**'
       - '.github/workflows/test-merge-transaction.yml'
 
 permissions:
@@ -19,14 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse composite action manifest
+      - name: Parse composite action manifests
         run: |
-          ruby -e "require 'yaml'; doc = YAML.safe_load(File.read('actions/merge-transaction/action.yml'), aliases: true); abort 'missing composite runs' unless doc.is_a?(Hash) && doc.dig('runs', 'using') == 'composite' && doc.dig('runs', 'steps').is_a?(Array)"
+          ruby -e "require 'yaml'; ['actions/merge-transaction/action.yml','actions/trusted-merge-hold/action.yml'].each { |p| doc = YAML.safe_load(File.read(p), aliases: true); abort \"missing composite runs: #{p}\" unless doc.is_a?(Hash) && doc.dig('runs','using') == 'composite' && doc.dig('runs','steps').is_a?(Array) }"
       - name: Compile
-        run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/fallback_provenance.py actions/merge-transaction/provider.py actions/merge-transaction/test_merge_transaction.py actions/merge-transaction/test_fallback_provenance.py actions/merge-transaction/test_provider.py
+        run: python3 -m py_compile actions/merge-transaction/merge_transaction.py actions/merge-transaction/fallback_provenance.py actions/merge-transaction/provider.py actions/merge-transaction/test_merge_transaction.py actions/merge-transaction/test_fallback_provenance.py actions/merge-transaction/test_provider.py actions/trusted-merge-hold/control.py actions/trusted-merge-hold/test_control.py
       - name: Provider-state regressions
         run: python3 actions/merge-transaction/test_merge_transaction.py -v
       - name: Fallback provenance regressions
         run: python3 actions/merge-transaction/test_fallback_provenance.py -v
       - name: Provider composition regressions
         run: python3 actions/merge-transaction/test_provider.py -v
+      - name: Trusted STOP classifier regressions
+        run: python3 actions/trusted-merge-hold/test_control.py
