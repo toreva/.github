@@ -106,13 +106,18 @@ def classify_transport_failure(message: str) -> str:
     return "github_transport_failed:" + message
 
 
-def run_gh(args: list[str], attempts: int = 3) -> str:
+def run_gh(args: list[str], attempts: int = 3, merge_queue_fallback: bool = False) -> str:
     last = ""
     for attempt in range(1, attempts + 1):
         result = subprocess.run(["gh", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode == 0:
             return result.stdout
         last = (result.stderr or result.stdout or "gh_failed").strip()[:400]
+        # Merge queue incompatibility with --delete-branch is a recoverable error
+        # when merge_queue_fallback is enabled. Fail fast so the caller can retry
+        # without the flag.
+        if merge_queue_fallback and "merge queue enabled" in last.lower():
+            raise TxnError("merge_queue_delete_branch_incompatible")
         # Retry reads, not effects. A permission refusal is permanent: retrying
         # it burns provider budget and delays the only useful output, the cause.
         if PERMISSION_DENIED.search(last):
@@ -400,7 +405,14 @@ def arm(pr: PullRequestRef, expected: str, required_label: str, reject_title_pre
     assert_arm_provider_admission(pr, head)
 
     args = ["pr", "merge", pr.url, "--auto", "--squash", "--delete-branch", "--match-head-commit", head]
-    run_gh(args)
+    try:
+        run_gh(args, merge_queue_fallback=True)
+    except TxnError as exc:
+        if str(exc) == "merge_queue_delete_branch_incompatible":
+            args = ["pr", "merge", pr.url, "--auto", "--squash", "--match-head-commit", head]
+            run_gh(args)
+        else:
+            raise
 
     final = query_pr(pr)
     exact_head(final, head)
