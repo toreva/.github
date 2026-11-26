@@ -8,7 +8,10 @@ admissions every live landing path must share:
 * daemon fallback provenance must be coherent before autonomous arm;
 * a source vehicle must not also mutate issue terminal state via GitHub closing
   keywords; and
-* a live STOP control can persist a merge hold before revoking queue/auto-merge.
+* a live STOP control can persist a merge hold before revoking queue/auto-merge;
+* arm refuses a PR that carries any hold label, and refuses to re-arm/re-queue a
+  PR whose latest merge-queue run failed on the same head (TCTC-33 queue
+  re-entry breaker: 2,127 of 2,410 historical merge-queue failures were repeats).
 
 `admit` exposes the terminal-separation check without provider mutation so repos
 whose actual landing authority is GitHub merge queue can reuse the same rule.
@@ -29,6 +32,10 @@ ROOT = Path(__file__).resolve().parent
 HOLD_LABEL = "merge-hold"
 HOLD_LABEL_COLOR = "B60205"
 HOLD_LABEL_DESCRIPTION = "Machine-enforced merge hold; explicit release required"
+# Same convention as goblin_infra scripts/fleet-arm-gate.py: any label whose name
+# contains "hold" is a hold (merge-hold, legal-hold, ...). Refusal only.
+ANY_HOLD_LABEL_RE = re.compile(r"hold", re.IGNORECASE)
+MERGE_QUEUE_REF_RE = re.compile(r"^gh-readonly-queue/[^/]+/pr-(\d+)-")
 
 # GitHub recognizes these keyword/reference shapes and closes linked issues when
 # the PR reaches the default branch. Source merge is not operational completion,
@@ -161,12 +168,102 @@ def hold(pr: Any, expected: str) -> tuple[str, dict[str, Any]]:
     return head, {**fields, "merge_hold_label": HOLD_LABEL}
 
 
+def assert_no_hold_label(pr: Any, expected: str) -> None:
+    """Refuse arm while any hold label is live on the exact head (refusal only)."""
+    snapshot = query_pr(pr)
+    _core.exact_head(snapshot, expected)
+    held = sorted(name for name in _core.label_names(snapshot) if ANY_HOLD_LABEL_RE.search(name))
+    if held:
+        raise TxnError(f"hold_label_present:{','.join(held)}")
+
+
+def queue_reentry_blocker(
+    number: int,
+    head: str,
+    runs: list[dict[str, Any]],
+    queue_commit_parents: dict[str, list[str]],
+    head_committed_at: str | None,
+) -> str | None:
+    """Pure decision for the queue re-entry breaker.
+
+    Returns a blocker code, or None when arming may proceed. Only the latest
+    *completed* merge_group run for this PR matters. It blocks when that run
+    concluded failure and the head is unchanged since: proven by the queue
+    commit's parents containing the head, or by the head commit predating the
+    failed run. When neither can be shown the answer is a refusal, because
+    unknown is not zero.
+    """
+    mine = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        match = MERGE_QUEUE_REF_RE.match(str(run.get("head_branch") or ""))
+        if match and int(match.group(1)) == number and run.get("status") == "completed":
+            mine.append(run)
+    if not mine:
+        return None
+    last = max(mine, key=lambda run: str(run.get("created_at") or ""))
+    if last.get("conclusion") != "failure":
+        return None
+    run_id = last.get("id")
+    created = str(last.get("created_at") or "")
+    parents = queue_commit_parents.get(str(last.get("head_sha") or ""))
+    if parents is not None and head in parents:
+        return f"queue_reentry_refused:last_merge_group_run={run_id}:failed_on_same_head={head}"
+    if head_committed_at and created:
+        if head_committed_at <= created:
+            return f"queue_reentry_refused:last_merge_group_run={run_id}:head_predates_failure={head}"
+        return None
+    return f"queue_reentry_unproven:last_merge_group_run={run_id}:head={head}"
+
+
+def assert_no_queue_reentry(pr: Any, expected: str) -> None:
+    """Refuse re-arming a PR whose latest merge-queue run failed on this head.
+
+    Reads are provider truth via the same governed gh transport. A read failure
+    raises TxnError (refusal); it never arms on an unknown history.
+    """
+    raw = _core.run_gh(["api", f"repos/{pr.slug}/actions/runs?event=merge_group&per_page=100"])
+    payload = _core.load_json(raw, "queue_reentry_history_unreadable")
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        raise TxnError("queue_reentry_history_unreadable:unexpected_shape")
+    parents: dict[str, list[str]] = {}
+    mine = [
+        run for run in runs
+        if isinstance(run, dict)
+        and (m := MERGE_QUEUE_REF_RE.match(str(run.get("head_branch") or "")))
+        and int(m.group(1)) == pr.number
+        and run.get("status") == "completed"
+    ]
+    if not mine:
+        return
+    last = max(mine, key=lambda run: str(run.get("created_at") or ""))
+    if last.get("conclusion") != "failure":
+        return
+    queue_sha = str(last.get("head_sha") or "")
+    if queue_sha:
+        commit = _core.load_json(_core.run_gh(["api", f"repos/{pr.slug}/commits/{queue_sha}"]), "queue_commit_unreadable")
+        if isinstance(commit, dict):
+            parents[queue_sha] = [p.get("sha") for p in commit.get("parents") or [] if isinstance(p, dict)]
+    head_commit = _core.load_json(_core.run_gh(["api", f"repos/{pr.slug}/commits/{expected}"]), "head_commit_unreadable")
+    committed = None
+    if isinstance(head_commit, dict):
+        committed = ((head_commit.get("commit") or {}).get("committer") or {}).get("date")
+    blocker = queue_reentry_blocker(pr.number, expected, runs, parents, committed)
+    if blocker:
+        raise TxnError(blocker)
+
+
 def arm(pr: Any, expected: str, required_label: str, reject_title_prefix: str) -> None:
     admit(pr, expected)
     try:
         _provenance.admit(pr.url, expected)
     except _provenance.AdmissionError as exc:
         raise TxnError(f"fallback_provenance_refused:{exc}") from exc
+    # TCTC-33 refusal-only gates: after the existing admissions, before any arm mutation.
+    assert_no_hold_label(pr, expected)
+    assert_no_queue_reentry(pr, expected)
     _core.arm(pr, expected, required_label, reject_title_prefix)
 
 
