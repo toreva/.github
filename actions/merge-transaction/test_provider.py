@@ -48,6 +48,9 @@ def run_gh(args):
         _log("label_apply")
         os.environ["MERGE_HOLD_SET"]="1"
         return json.dumps([{"name":"merge-hold"}])
+    if "/actions/runs?event=merge_group" in joined:
+        _log("queue_history_read")
+        return json.dumps({"workflow_runs": []})
     _log("provider_read")
     return json.dumps({"head":{"sha":"a"*40},"body":os.environ.get("PR_BODY","")})
 def load_json(raw, code): return json.loads(raw)
@@ -130,7 +133,7 @@ class ProviderFacadeTests(unittest.TestCase):
         pr = mod.parse_pr_url(PR)
         self.log.write_text("")
         mod.arm(pr, HEAD, "", "[SUPERSEDED")
-        self.assertEqual(self.calls(), ["provider_read", "provenance", "core_arm"])
+        self.assertEqual(self.calls(), ["provider_read", "provenance", "query", "queue_history_read", "core_arm"])
 
     def test_import_api_provenance_refusal_prevents_core_arm(self):
         mod = self.module()
@@ -165,7 +168,16 @@ class ProviderFacadeTests(unittest.TestCase):
         self.log.write_text("")
         os.environ["PR_BODY"] = "This closes the source composition gap. Refs #2642 for runtime proof."
         mod.arm(pr, HEAD, "", "[SUPERSEDED")
-        self.assertEqual(self.calls(), ["provider_read", "provenance", "core_arm"])
+        self.assertEqual(self.calls(), ["provider_read", "provenance", "query", "queue_history_read", "core_arm"])
+
+    def test_arm_refuses_live_hold_label_after_admissions_before_core(self):
+        mod = self.module()
+        pr = mod.parse_pr_url(PR)
+        self.log.write_text("")
+        os.environ["MERGE_HOLD_SET"] = "1"
+        with self.assertRaisesRegex(mod.TxnError, "hold_label_present:merge-hold"):
+            mod.arm(pr, HEAD, "", "[SUPERSEDED")
+        self.assertEqual(self.calls(), ["provider_read", "provenance", "query"])
 
     def test_hold_persists_label_before_revoking_and_reobserves_both(self):
         mod = self.module()
@@ -215,7 +227,7 @@ class ProviderFacadeTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.calls(), ["parse", "provider_read", "provenance", "core_arm"])
+        self.assertEqual(self.calls(), ["parse", "provider_read", "provenance", "query", "queue_history_read", "core_arm"])
 
     def test_cli_hold_uses_same_persist_then_revoke_transaction(self):
         env = os.environ.copy()
