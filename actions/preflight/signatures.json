@@ -1,0 +1,150 @@
+{
+ "version": 1,
+ "signatures": [
+  {
+   "id": "S01-held-pr-in-queue",
+   "rule": "P1",
+   "status": "preventable",
+   "match": {
+    "log": "source PR #\\d+ carries merge-hold"
+   },
+   "example": "https://github.com/toreva/app.toreva.com/actions/runs/39591599610"
+  },
+  {
+   "id": "S02-queue-reentry",
+   "rule": "P2",
+   "status": "preventable",
+   "match": {
+    "meta": "event == merge_group AND an earlier merge_group run for the same repo+PR concluded failure AND no new head sha since"
+   },
+   "example": "https://github.com/goblin-agent/goblin_ui/actions/runs/41169242365"
+  },
+  {
+   "id": "S03-bot-state-commit",
+   "rule": "P3",
+   "status": "preventable",
+   "match": {
+    "meta": "actor is a bot AND head commit touches only state/memory paths",
+    "log_or_message": "\\[automated by agent-monitor workflow\\]|update memory state from monitoring"
+   },
+   "example": "https://github.com/goblin-agent/coordinator/actions/runs/34436475966"
+  },
+  {
+   "id": "S04-runner-image-drift",
+   "rule": "P4",
+   "status": "preventable",
+   "match": {
+    "log": "does not support \\S+ on ubuntu\\d+\\.\\d+|Node\\.js 20 actions are deprecated|Unable to locate executable"
+   },
+   "example": "https://github.com/goblin-agent/goblin_ui/actions/runs/41169242365"
+  },
+  {
+   "id": "S05-structure-invariant",
+   "rule": "P5",
+   "status": "preventable",
+   "match": {
+    "log": "FAILED-SCRIPT: \\\[(?:\\d+/\\d+)\\]|CI-0\\d\\d violation|FAIL #\\d+ .* missing '|still resolve into the worktree"
+   },
+   "example": "https://github.com/goblin-agent/coordinator/actions/runs/45473976733"
+  },
+  {
+   "id": "S06-registry-allowlist",
+   "rule": "P5",
+   "status": "preventable",
+   "match": {
+    "log": "to deeply equal \\[|not reached by any workflow|add it to the baseline"
+   },
+   "example": "https://github.com/toreva/gateway/actions/runs/45508174275"
+  },
+  {
+   "id": "S07-type-contract",
+   "rule": "P5",
+   "status": "preventable",
+   "match": {
+    "log": "error TS\\d{4,5}:"
+   },
+   "example": "https://github.com/toreva/ai-engine/actions/runs/34527171809"
+  },
+  {
+   "id": "S08-unit-regression",
+   "rule": "P5",
+   "status": "preventable",
+   "match": {
+    "log": "AssertionError|Tests +\\d+ failed|\\d+ failed, \\d+ passed|FAILED \\\((?:failures=\\d+)\\)"
+   },
+   "example": "https://github.com/toreva/user-engine/actions/runs/38065014750"
+  },
+  {
+   "id": "S09-clean-env-assumption",
+   "rule": "P5",
+   "status": "preventable",
+   "match": {
+    "log": "ModuleNotFoundError|No module named|command not found|Invalid Chai property: toBe|/Users/\\w+/"
+   },
+   "example": "https://github.com/toreva/marketing/actions/runs/36206971419"
+  },
+  {
+   "id": "S10-advisory-drift",
+   "rule": "P6",
+   "status": "preventable",
+   "match": {
+    "log": "\\d+ (high|critical) severity vulnerabilit|\\d+ vulnerabilities \\(.\*\\)|npm audit fix"
+   },
+   "example": "https://github.com/goblin-agent/goblin_ui/actions/runs/40113685181"
+  },
+  {
+   "id": "S11-cascade-aggregator",
+   "rule": "P7",
+   "status": "secondary",
+   "match": {
+    "log": "required prerequisite \\w+ ended failure; refusing merge authority"
+   },
+   "example": "https://github.com/toreva/app.toreva.com/actions/runs/40846745268"
+  },
+  {
+   "id": "S12-deploy-admission-guardrail",
+   "rule": "P8",
+   "status": "preventable",
+   "match": {
+    "log": "\"admitted\":false|Require source semantic admission|Enforce .\* guardrails"
+   },
+   "example": "https://github.com/toreva/user-engine/actions/runs/34104391185"
+  },
+  {
+   "id": "S13-deploy-contract-debt",
+   "rule": "P8",
+   "status": "preventable",
+   "match": {
+    "log": "Each is tracked debt, not an approval"
+   },
+   "example": "https://github.com/toreva/app.toreva.com/actions/runs/44843267635"
+  },
+  {
+   "id": "S14-post-deploy-acceptance",
+   "rule": "none",
+   "status": "signal",
+   "match": {
+    "log": "deployed_not_accepted|Reject failed release after bounded rollback"
+   },
+   "example": "https://github.com/toreva/app.toreva.com/actions/runs/36556364651"
+  },
+  {
+   "id": "S15-readiness-timeout",
+   "rule": "none",
+   "status": "signal",
+   "match": {
+    "log": "Wait for exact source SHA to be ready"
+   },
+   "example": "https://github.com/toreva/identity/actions/runs/35680148448"
+  },
+  {
+   "id": "S16-e2e-only",
+   "rule": "P5-slow",
+   "status": "preventable",
+   "match": {
+    "log": "playwright-failure-shard-\\d+"
+   },
+   "example": "https://github.com/toreva/app.toreva.com/actions/runs/34552782283"
+  }
+ ]
+}
